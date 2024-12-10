@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: MIT
+
+name: CI Parse Only Label
+
+# This workflow represents a specific configuration for a
+# single MACHINE as a specific design goal. It utilizes a
+# reusable workflow found at distro-core.
+
+# Secrets
+# secrets.ACTIONS_STEP_DEBUG                Repository
+
+# Self hosted runners have the prerequsite dependency to
+# install the host tools dependencies before workflow use.
+
+on:
+  workflow_run:
+    workflows:
+    - CI Parse Only Build
+    - CI Parse Only Fetch
+    types:
+      - completed
+
+# workflow permissions for current repository
+
+permissions:
+  actions: write
+  contents: write
+  id-token: write
+  issues: write
+
+########################################################################
+
+jobs:
+
+  Run:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+
+    - name: Context Diagnostic
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const githubJson = JSON.stringify(github, null, 2);
+          const contextJson = JSON.stringify(context, null, 2);
+          console.log("GitHub Context as JSON:");
+          console.log(githubJson);
+          console.log("Context Context as JSON:");
+          console.log(contextJson);
+
+    - name: Log Workflow Run Details
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const workflowRun = context.payload.workflow_run;
+          console.log(`Workflow Run ID: ${workflowRun.id}`);
+          console.log(`Workflow Name: ${workflowRun.name}`);
+          console.log(`Workflow Conclusion: ${workflowRun.conclusion}`);
+          console.log(`Triggered By: ${workflowRun.triggering_actor.login}`);
+          console.log(`Head Branch: ${workflowRun.head_branch}`);
+          console.log(`Head Commit SHA: ${workflowRun.head_sha}`);
+
+    - name: Extract Workflow Status
+      id: status-check
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const status = context.payload.workflow_run.conclusion;
+          core.exportVariable('status', status);
+
+    - name: Apply Label or Create Issue
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const { owner, repo } = context.repo;
+          const commitSha = github.sha;
+          const status = process.env.status;
+          const label = status === 'success' ? 'parse-only-success' : 'parse-only-failure';
+
+          // Search for pull requests associated with the commit
+          const prs = await github.repos.listPullRequestsAssociatedWithCommit({
+            owner,
+            repo,
+            commit_sha: commitSha,
+          });
+
+          if (prs.data.length > 0) {
+            // If a PR is found, apply the label
+            await github.issues.addLabels({
+              owner,
+              repo,
+              issue_number: prs.data[0].number,
+              labels: [label],
+            });
+          } else {
+            // If no PR is found, create an issue
+            const issueTitle = `Workflow ${status}: Commit ${commitSha}`;
+            const issueBody = `The workflow concluded with a status of **${status}** for commit \`${commitSha}\`.`;
+            await github.issues.create({
+              owner,
+              repo,
+              title: issueTitle,
+              body: issueBody,
+            });
+          }
