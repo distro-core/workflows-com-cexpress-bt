@@ -1,0 +1,143 @@
+# SPDX-License-Identifier: MIT
+
+name: Create Pull Request
+run-name: ${{ github.workflow }} ${{ github.event_name }} on ${{ github.ref_name && github.ref_name || github.ref }}
+
+# This workflow is an example of running a workflow on a GitHub Hosted
+# runner. It performs the nominal process of running a build process
+# with only syntax checking. The workflow utilizes shared workflow
+# actions from the common library.
+
+# Secrets
+# secrets.ACTIONS_STEP_DEBUG                Repository
+
+# Self hosted runners have the prerequsite dependency to install the
+# host tools dependencies before workflow use.
+
+on:
+  workflow_run:
+    workflows:
+    - Cloud Build
+    - Cloud Fetch
+    - Cloud Parse
+    types:
+      - completed
+
+# Workflow permissions for current repository; use the principal of
+# assigning the least necessary permissions required.
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+########################################################################
+
+# Workflow environment initial state. The environment is utilized to
+# setup values used by job steps.
+
+# env:
+#   _PLACE_HOLDER_KEY: _PLACE_HOLDER_VALUE
+
+########################################################################
+
+jobs:
+
+  Run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+
+    # GitHub actions github-script
+    # https://github.com/actions/github-script
+
+    - name: Context dump for diagnostics
+      uses: actions/github-script@v7
+      with:
+        script: |
+          console.log(`"github":\n${JSON.stringify(github, null, 2)}`);
+          console.log(`"context":\n${JSON.stringify(context, null, 2)}`);
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_branch }}
+
+    - name: Create or update branch and commit changes
+      uses: actions/github-script@v7
+      id: create_or_update_branch
+      with:
+        script: |
+          const branchName = 'new-feature-branch';
+          const { owner, repo } = context.repo;
+
+          try {
+            await github.rest.git.getRef({
+              owner,
+              repo,
+              ref: `heads/${branchName}`,
+            });
+            console.log(`Branch ${branchName} already exists. Updating...`);
+          } catch (error) {
+            if (error.status === 404) {
+              console.log(`Branch ${branchName} does not exist. Creating...`);
+              await github.rest.git.createRef({
+                owner,
+                repo,
+                ref: `refs/heads/${branchName}`,
+                sha: context.sha,
+              });
+            } else {
+              throw error;
+            }
+          }
+
+          // Make example changes
+          const fs = require('fs').promises;
+          await fs.writeFile('changes.txt', 'Changes triggered by workflow run.\n', { flag: 'a' });
+
+          // Commit changes
+          await github.rest.repos.createOrUpdateFileContents({
+            owner,
+            repo,
+            path: 'changes.txt',
+            message: 'Automated changes after workflow run',
+            content: Buffer.from(await fs.readFile('changes.txt')).toString('base64'),
+            branch: branchName,
+            sha: (await github.rest.repos.getContent({
+              owner,
+              repo,
+              path: 'changes.txt',
+            }).catch(() => ({ data: { sha: null } }))).data.sha,
+          });
+          return branchName;
+
+    - name: Create pull-request
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const branchName = '${{ steps.create_or_update_branch.outputs.result }}';
+          const { owner, repo } = context.repo;
+          const baseBranch = '${{ github.event.workflow_run.base_branch }}';
+
+          const { data: pullRequests } = await github.rest.pulls.list({
+            owner,
+            repo,
+            head: `${owner}:${branchName}`,
+            base: baseBranch,
+          });
+
+          if (pullRequests.length === 0) {
+            await github.rest.pulls.create({
+              owner,
+              repo,
+              title: 'Automated Pull Request from Workflow Run',
+              head: branchName,
+              base: baseBranch,
+              body: `This pull request was automatically created after the successful completion of the "${{ github.event.workflow_run.name }}" workflow run.`,
+            });
+            console.log('Pull request created successfully.');
+          } else {
+              console.log('Pull request already exists.');
+          }
